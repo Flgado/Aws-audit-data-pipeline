@@ -2,6 +2,10 @@
 
 ## Overview
 
+<p align="center">
+  <img src="./infra.svg" alt="Required User Permissions" />
+</p>
+
 This project leverages AWS Serverless Application Model (SAM) to build a serverless audit log ingestion pipeline using AWS services like API Gateway, Lambda, Kinesis Data Firehose, S3, Glue, and Athena. It enables reliable, scalable, and cost-effective collection, transformation, and querying of audit logs.
 
 For a detailed explanation of the implementation, check out my blog post: [Building a Serverless Audit Log Pipeline with AWS SAM — Easy, Fast & Fun](https://jfolgado.com/posts/audittrail/).
