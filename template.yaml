@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  AuditLog DATA Pipeline
+  This template deploys a data pipeline that receives audit logs, processes them, and stores them in S3 using Kinesis Data Firehose.
+  It includes a Lambda function for data transformation and an API Gateway for receiving audit data.
+
+Parameters:
+  UserPool:
+    Type: String
+    Description: User pool for Cognito
+  AccountId:
+    Type: String
+    Description: Account Id
+  Region:
+    Type: String
+    Description: AWS Region
+
+Globals:
+  Function:
+    Timeout: 5
+    MemorySize: 128
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+
+######### API #############
+
+  Api:
+    TracingEnable: true
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            Type: CognitoAuthorizer
+            AuthorizationScopes:
+              - email
+              - openid
+              - profile
+            UserPoolArn: !Sub arn:aws:cognito-idp:${Region}:${AccountId}:userpool/${Region}${UserPool}
+        DefaultAuthorizer: CognitoAuthorizer
+
+########### LAMBDA ###########
+
+  TransformationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+      BuildTarget: build-TransformationFunction
+    Properties:
+      CodeUri: .
+      Handler: bootstrap
+      Runtime: provided.al2
+      Architectures:
+        - x86_64 
+
+  AuditReceiver:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+      BuildTarget: build-AuditReceiver
+    Properties:
+      CodeUri: .
+      Handler: bootstrap
+      Runtime: provided.al2
+      Architectures:
+        - x86_64
+      Events:
+        AnalyzeComments:
+          Type: Api
+          Properties:
+            Method: POST
+            Path: /send-audit
+            RestApiId: !Ref Api
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:*
+                - logs:*
+                - firehose:PutRecord
+                - firehose:PutRecordBatch
+              Resource:
+                - !GetAtt Firehose.Arn
+
+  ########### S3 BUCKET ###########
+  DeliveryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "audit-data-test"
+
+  ########## KINESIS DATA FIREHOSE ###########
+  Firehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn:
+      - DeliveryStreamPolicy
+    Properties:
+      DeliveryStreamType: DirectPut
+      DeliveryStreamName: "kdf-firehose-audit-folgado"
+      ExtendedS3DestinationConfiguration: # where data is delivery
+        DynamicPartitioningConfiguration:
+          Enabled: true
+        BucketARN: !GetAtt DeliveryBucket.Arn
+        RoleARN: !GetAtt DeliveryStreamRole.Arn
+        ProcessingConfiguration: # will do transformations on the data
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt TransformationFunction.Arn # the lambda function that will process the data
+        BufferingHints:
+          IntervalInSeconds: 120
+          SizeInMBs: 64
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: "/aws/kinesisfirehose/ibcd"
+          LogStreamName: "S3Delivery"
+        EncryptionConfiguration:
+          NoEncryptionConfig: "NoEncryption"
+        Prefix: "audit_type=!{partitionKeyFromLambda:audit_type}/year=!{partitionKeyFromLambda:year}/month=!{partitionKeyFromLambda:month}/day=!{partitionKeyFromLambda:day}/"
+        ErrorOutputPrefix: "errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+
+########## Policies ###########
+  DeliveryStreamPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - !Ref DeliveryStreamRole
+      PolicyName: firehose_delivery_policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:AbortMultipartUpload'
+              - 's3:GetBucketLocation'
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:ListBucketMultipartUploads'
+              - 's3:PutObject'
+            Resource:
+              - !GetAtt DeliveryBucket.Arn
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref DeliveryBucket
+                  - '*'
+          - Effect: Allow
+            Action:
+              - 'lambda:InvokeFunction'
+            Resource:
+              - !GetAtt TransformationFunction.Arn
+          - Effect: Allow
+            Action:
+              - 'cloudwatch:*'
+              - 'logs:*'
+            Resource: '*'
+
+  DeliveryStreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
